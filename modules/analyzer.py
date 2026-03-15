@@ -13,6 +13,10 @@ Risk options:     Low  | Medium | High
 If ANTHROPIC_API_KEY is not set, runs in data-only mode;
 apps are returned unchanged with no verdicts attached.
 
+With --anonymize, emails are replaced with anonymous IDs (user_001, user_002...)
+before being sent to the Claude API. Verdicts are mapped back to real emails
+in the output. Anthropic's API never receives email addresses in this mode.
+
 """
 
 import os
@@ -35,7 +39,7 @@ For each application you receive, analyze every assigned user and return a
 verdict on whether their access should be kept, reviewed by a human, or revoked.
 
 ## Data you will receive per user
-- Email / login
+- Email / login (may be anonymized as user_001, user_002... for privacy)
 - Department and job title (sourced from HR via Okta directory)
 - How many days ago they were assigned access
 - When they last authenticated to this specific application (or not in last 180 days)
@@ -118,7 +122,7 @@ class OktaAnalyzer:
             print(f"[!] ANTHROPIC_API_KEY not set; running in data-only mode\n")
             self.client = None
 
-    def analyze_all(self, apps):
+    def analyze_all(self, apps, anonymize=False):
         """
         Analyze all apps. Calls analyze_app() for each.
         Returns the enriched apps list with verdicts attached.
@@ -135,13 +139,13 @@ class OktaAnalyzer:
                 continue
 
             print(f"  [{i}/{total}] Analyzing: {app['name']} ({len(app['users'])} users)...")
-            app = self.analyze_app(app)
+            app = self.analyze_app(app, anonymize=anonymize)
             analyzed += 1
 
         print(f"\n[+] Analysis complete; {analyzed} apps analyzed\n")
         return apps
 
-    def analyze_app(self, app):
+    def analyze_app(self, app, anonymize=False):
         """
         Send a single app to Claude for analysis.
         Attaches verdict, risk, and reasoning to each user in the app.
@@ -150,7 +154,7 @@ class OktaAnalyzer:
         if not self.enabled:
             return app
 
-        prompt = self._build_prompt(app)
+        prompt, user_map = self._build_prompt(app, anonymize=anonymize)
 
         try:
             response = self.client.messages.create(
@@ -170,7 +174,7 @@ class OktaAnalyzer:
 
             raw_text = response.content[0].text.strip()
             verdicts = self._parse_response(raw_text, app)
-            app      = self._attach_verdicts(app, verdicts)
+            app      = self._attach_verdicts(app, verdicts, user_map=user_map)
 
         except anthropic.RateLimitError:
             print(f"\n[!] Rate limit hit on {app['name']}; waiting 60s...")
@@ -194,7 +198,7 @@ class OktaAnalyzer:
                 )
                 raw_text = response.content[0].text.strip()
                 verdicts = self._parse_response(raw_text, app)
-                app      = self._attach_verdicts(app, verdicts)
+                app      = self._attach_verdicts(app, verdicts, user_map=user_map)
             except Exception as e:
                 print(f"\n[-] Retry failed for {app['name']}: {e}")
                 app = self._attach_fallback(app)
@@ -205,10 +209,13 @@ class OktaAnalyzer:
 
         return app
 
-    def _build_prompt(self, app):
+    def _build_prompt(self, app, anonymize=False):
         """
         Build the per-app prompt with department distribution
         and individual user context.
+        With anonymize=True, emails are replaced with user_001, user_002...
+        Returns (prompt_string, user_map) where user_map maps anon_id → real login.
+        user_map is empty when anonymize=False.
         """
         lines = [
             f"## Application: {app['name']}",
@@ -230,9 +237,16 @@ class OktaAnalyzer:
         lines.append("")
         lines.append("## Individual user assignments:")
 
-        for u in app["users"]:
+        user_map = {}
+        for i, u in enumerate(app["users"]):
+            if anonymize:
+                display_id           = f"user_{i+1:03d}"
+                user_map[display_id] = u["login"]
+            else:
+                display_id = u["login"]
+
             lines.append(
-                f"- {u['login']} | "
+                f"- {display_id} | "
                 f"Dept: {u.get('department', 'Unknown')} | "
                 f"Title: {u.get('title', 'Unknown')} | "
                 f"Status: {u.get('status', 'Unknown')} | "
@@ -246,7 +260,7 @@ class OktaAnalyzer:
             "Analyze each user and return a JSON array with your verdicts."
         )
 
-        return "\n".join(lines)
+        return "\n".join(lines), user_map
 
     def _parse_response(self, raw_text, app):
         """
@@ -254,7 +268,7 @@ class OktaAnalyzer:
         Strips markdown fences if Claude added them despite instructions.
         Falls back to Review for any user Claude missed or malformed.
         """
-        # Strip markdown fences if present
+        #Strip markdown fences if present
         if raw_text.startswith("```"):
             raw_text = raw_text.split("```")[1]
             if raw_text.startswith("json"):
@@ -270,12 +284,12 @@ class OktaAnalyzer:
         #Validate and sanitize each verdict
         clean = []
         for v in verdicts:
-            verdict  = v.get("verdict", "Review")
-            risk     = v.get("risk", "Medium")
-            login    = v.get("login", "")
+            verdict   = v.get("verdict", "Review")
+            risk      = v.get("risk", "Medium")
+            login     = v.get("login", "")
             reasoning = v.get("reasoning", "Could not analyze.")
 
-            # Enforce valid values
+            #Enforce valid values
             if verdict not in VALID_VERDICTS:
                 verdict = "Review"
             if risk not in VALID_RISKS:
@@ -290,11 +304,18 @@ class OktaAnalyzer:
 
         return clean
 
-    def _attach_verdicts(self, app, verdicts):
+    def _attach_verdicts(self, app, verdicts, user_map=None):
         """
         Match Claude's verdicts back to users by login.
+        If anonymize was used, remaps anon IDs back to real emails first.
         Any user not matched gets a fallback Review verdict.
         """
+        #Remap anon IDs back to real logins if anonymize was used
+        if user_map:
+            for v in verdicts:
+                if v.get("login") in user_map:
+                    v["login"] = user_map[v["login"]]
+
         verdict_map = {v["login"]: v for v in verdicts}
 
         for user in app["users"]:
