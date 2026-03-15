@@ -43,6 +43,7 @@ It pulls your full Okta application access inventory, enriches each assignment w
 - **AI-powered verdicts** — Claude analyzes department/title fit, usage patterns, and access duration to flag anomalies
 - **Department-aware analysis** — Claude sees the full distribution of users per app before analyzing individuals, enabling pattern-based detection
 - **Three output formats** — terminal (color-coded, actionable), JSON (audit evidence), CSV (manager review workflow)
+- **`--anonymize` flag** — replaces emails with anonymous IDs in Claude prompts so Anthropic's API never receives email addresses
 - **Graceful degradation** — runs in data-only mode without an Anthropic API key, producing a raw access inventory
 - **Rate limit aware** — handles Okta's per-endpoint rate limits with automatic backoff, safe for large orgs
 - **Enterprise-safe** — read-only, PII redaction flag, explicit data isolation between Okta and Claude
@@ -56,7 +57,7 @@ It pulls your full Okta application access inventory, enriches each assignment w
 │                    YOUR MACHINE                              │
 │                                                             │
 │  ┌─────────────┐     GET only      ┌─────────────────────┐ │
-│  │ connector.py│ ◄────────────────► │   Okta REST API     │ │
+│  │ connector.py│ ◄────────────────►│   Okta REST API     │ │
 │  └──────┬──────┘                   └─────────────────────┘ │
 │         │ raw API responses                                  │
 │         ▼                                                   │
@@ -81,9 +82,9 @@ It pulls your full Okta application access inventory, enriches each assignment w
 
 **Okta never communicates with Claude.** The Okta API token stays on your machine. It is never sent to Anthropic's servers.
 
-**What Claude receives:** a structured text prompt containing app name, sign-on type, department distribution, and per-user lines with login, department, title, account status, days since assignment, and last access date.
+**What Claude receives:** a structured text prompt containing app name, sign-on type, department distribution, and per-user lines with login (or anonymous ID), department, title, account status, days since assignment, and last access date.
 
-**What goes to Anthropic's servers:** only the text prompt described above. For enterprise use, ensure your Anthropic agreement covers this data. See the Security & Privacy section below.
+**What goes to Anthropic's servers:** only the text prompt described above. Use `--anonymize` to ensure no email addresses are included. See the Security & Privacy section below.
 
 ---
 
@@ -135,6 +136,14 @@ python3 main.py --output report_$(date +%Y%m%d)
 
 Produces `report_YYYYMMDD.json` and `report_YYYYMMDD.csv`.
 
+### Full run with email anonymization (recommended for enterprise)
+
+```bash
+python3 main.py --anonymize --output report_$(date +%Y%m%d)
+```
+
+Replaces all email addresses with anonymous IDs before sending to Claude. Verdicts are mapped back to real emails in the output. Anthropic's API receives no email addresses in this mode.
+
 ### Dry run — data collection only, no Claude calls
 
 ```bash
@@ -183,7 +192,7 @@ python3 main.py --show-all --output report
 
 By default Keep verdicts are hidden in the terminal — on a large org most users will be Keep and showing them all makes the report unreadable. Use this flag for a complete picture.
 
-### Redact emails for external sharing
+### Redact emails in output files
 
 ```bash
 python3 main.py --redact --output report
@@ -201,7 +210,8 @@ alice.admin@corp.com → ali*****@corp.com
 |---|---|
 | `--domain` | Okta domain. Overrides `.env` if set. |
 | `--output` | Base filename for output (produces `.json` and `.csv`) |
-| `--redact` | Partially redact email addresses in output |
+| `--redact` | Partially redact email addresses in output files |
+| `--anonymize` | Replace emails with anonymous IDs in Claude prompts. Recommended for orgs with strict DPA requirements. |
 | `--show-all` | Show Keep verdicts in terminal (hidden by default) |
 | `--failing-only` | Show only Revoke verdicts in terminal |
 | `--no-access-log` | Skip system log queries — faster but less accurate |
@@ -220,7 +230,7 @@ For each application, Claude receives a structured prompt containing:
 
 - Application name and sign-on type
 - Department distribution across all assigned users (e.g., "Engineering: 45, Finance: 1")
-- Per-user lines with: login, department, title, account status, days since assignment, last app access date, and Okta last login date
+- Per-user lines with: login or anonymous ID, department, title, account status, days since assignment, last app access date, and Okta last login date
 
 The department distribution is critical — it gives Claude pattern context before analyzing individuals. A Finance user in GitHub Enterprise stands out immediately when Claude sees that 47 of 48 other users are in Engineering.
 
@@ -353,12 +363,19 @@ This workflow satisfies the periodic access review requirement under SOC 2 (CC6.
 **Data isolation**
 - Claude never communicates with Okta — see the data flow diagram above
 - Okta API responses are never forwarded to Anthropic
-- What Anthropic receives: structured text only — app names, user emails, departments, titles, and access dates
+- What Anthropic receives: structured text only — app names, user logins or anonymous IDs, departments, titles, and access dates
 - Okta internal IDs, session tokens, and raw API responses never leave your machine
+
+**Minimizing PII exposure to Anthropic**
+- By default, user email addresses are included in Claude prompts to make verdicts traceable
+- Use `--anonymize` to replace all emails with anonymous IDs (user_001, user_002...) before sending to the Claude API
+- Verdicts are mapped back to real emails in the final output — Anthropic's API never receives a single email address in this mode, only departments, titles, and access metadata
+- Recommended for orgs with strict DPA requirements or concerns about API request logging retention
 
 **Enterprise data handling**
 - For production use, ensure your Anthropic enterprise agreement covers the data being processed
-- Employee PII (emails, names, departments) is sent to Anthropic's API — verify this is permitted under your data processing agreements
+- Under a Claude for Work / Business subscription, customer data is not used for model training
+- Use `--anonymize` to eliminate email addresses from API calls entirely
 - Use `--redact` to partially mask emails in output files before sharing externally
 
 **Rate limiting**
