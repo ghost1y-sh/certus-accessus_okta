@@ -34,7 +34,11 @@ VALID_RISKS    = {"Low", "Medium", "High"}
 #50 users × ~75 tokens per verdict = ~3750 tokens per batch
 #Comfortably under 8192 max_tokens per call
 USER_BATCH_SIZE = 50
-BATCH_SLEEP     = 5
+BATCH_SLEEP     = 10
+
+#Retry config for empty/failed responses
+MAX_RETRIES     = 3
+RETRY_DELAYS    = [15, 30, 60]  #seconds between retries
 
 SYSTEM_PROMPT = """
 You are a senior identity security analyst performing an access certification
@@ -129,6 +133,60 @@ class OktaAnalyzer:
             print(f"[!] ANTHROPIC_API_KEY not set; running in data-only mode\n")
             self.client = None
 
+    def _call_claude(self, prompt):
+        """
+        Make a single Claude API call with up to MAX_RETRIES retries.
+        Retries on empty responses and RateLimitErrors.
+        Returns raw response text or empty string on total failure.
+        """
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                response = self.client.messages.create(
+                    model      = "claude-sonnet-4-6",
+                    max_tokens = 8192,
+                    system     = [
+                        {
+                            "type": "text",
+                            "text": SYSTEM_PROMPT,
+                            "cache_control": {"type": "ephemeral"}
+                        }
+                    ],
+                    messages   = [{"role": "user", "content": prompt}]
+                )
+
+                #Check for empty response
+                if not response.content or not response.content[0].text.strip():
+                    if attempt < MAX_RETRIES:
+                        delay = RETRY_DELAYS[attempt]
+                        print(f"\n[!] Empty response (attempt {attempt+1}/{MAX_RETRIES+1}) — retrying in {delay}s...")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        print(f"\n[-] Empty response after {MAX_RETRIES} retries — giving up.")
+                        return ""
+
+                return response.content[0].text.strip()
+
+            except anthropic.RateLimitError:
+                if attempt < MAX_RETRIES:
+                    delay = RETRY_DELAYS[attempt]
+                    print(f"\n[!] Rate limit hit (attempt {attempt+1}/{MAX_RETRIES+1}) — retrying in {delay}s...")
+                    time.sleep(delay)
+                    continue
+                else:
+                    print(f"\n[-] Rate limit persists after {MAX_RETRIES} retries — giving up.")
+                    return ""
+
+            except Exception as e:
+                print(f"\n[-] API error (attempt {attempt+1}/{MAX_RETRIES+1}): {e}")
+                if attempt < MAX_RETRIES:
+                    delay = RETRY_DELAYS[attempt]
+                    time.sleep(delay)
+                    continue
+                return ""
+
+        return ""
+
     def analyze_all(self, apps, anonymize=False):
         """
         Analyze all apps. Calls analyze_app() for each.
@@ -138,17 +196,9 @@ class OktaAnalyzer:
         if not self.enabled:
             return apps
 
-        #Warmup call — ensures the connection is live after the
-        #potentially long Okta collection phase before analysis begins
+        #Warmup call — ensures connection is live after collection phase
         print(f"[*] Warming up Claude API connection...\n")
-        try:
-            self.client.messages.create(
-                model      = "claude-sonnet-4-6",
-                max_tokens = 10,
-                messages   = [{"role": "user", "content": "ping"}]
-            )
-        except Exception:
-            pass  #warmup failure is non-fatal
+        self._call_claude("ping")
 
         total    = len(apps)
         analyzed = 0
@@ -169,7 +219,7 @@ class OktaAnalyzer:
         Send a single app to Claude for analysis.
         Attaches verdict, risk, and reasoning to each user in the app.
         Large apps (>USER_BATCH_SIZE users) are split into batches.
-        Falls back to Review/Unknown on any error.
+        Falls back to Review on total failure.
         """
         if not self.enabled:
             return app
@@ -179,78 +229,12 @@ class OktaAnalyzer:
             return self._analyze_large_app(app, anonymize=anonymize)
 
         prompt, user_map = self._build_prompt(app, anonymize=anonymize)
+        raw_text         = self._call_claude(prompt)
 
-        try:
-            response = self.client.messages.create(
-                model      = "claude-sonnet-4-6",
-                max_tokens = 8192,
-                system     = [
-                    {
-                        "type": "text",
-                        "text": SYSTEM_PROMPT,
-                        "cache_control": {"type": "ephemeral"}  #prompt caching
-                    }
-                ],
-                messages   = [
-                    {"role": "user", "content": prompt}
-                ]
-            )
-
-            #Handle empty response with a retry before falling back
-            if not response.content or not response.content[0].text.strip():
-                print(f"\n[!] Empty response for {app['name']} — retrying after 30s...")
-                time.sleep(30)
-                response = self.client.messages.create(
-                    model      = "claude-sonnet-4-6",
-                    max_tokens = 8192,
-                    system     = [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-                    messages   = [{"role": "user", "content": prompt}]
-                )
-
-            raw_text = response.content[0].text.strip() if response.content else ""
+        if raw_text:
             verdicts = self._parse_response(raw_text, app)
             app      = self._attach_verdicts(app, verdicts, user_map=user_map)
-
-        except anthropic.RateLimitError:
-            print(f"\n[!] Rate limit hit on {app['name']}; waiting 60s...")
-            time.sleep(60)
-            #Retry once
-            try:
-                response = self.client.messages.create(
-                    model      = "claude-sonnet-4-6",
-                    max_tokens = 8192,
-                    system     = [
-                        {
-                            "type": "text",
-                            "text": SYSTEM_PROMPT,
-                            "cache_control": {"type": "ephemeral"}
-                        }
-                    ],
-                    messages   = [
-                        {"role": "user", "content": prompt}
-                    ]
-                )
-
-                #Handle empty response on retry path too
-                if not response.content or not response.content[0].text.strip():
-                    print(f"\n[!] Empty response on retry for {app['name']} — retrying after 30s...")
-                    time.sleep(30)
-                    response = self.client.messages.create(
-                        model      = "claude-sonnet-4-6",
-                        max_tokens = 8192,
-                        system     = [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-                        messages   = [{"role": "user", "content": prompt}]
-                    )
-
-                raw_text = response.content[0].text.strip() if response.content else ""
-                verdicts = self._parse_response(raw_text, app)
-                app      = self._attach_verdicts(app, verdicts, user_map=user_map)
-            except Exception as e:
-                print(f"\n[-] Retry failed for {app['name']}: {e}")
-                app = self._attach_fallback(app)
-
-        except Exception as e:
-            print(f"\n[-] Analysis failed for {app['name']}: {e}")
+        else:
             app = self._attach_fallback(app)
 
         return app
@@ -417,8 +401,8 @@ class OktaAnalyzer:
 
     def _attach_fallback(self, app):
         """
-        If the entire API call failed, mark all users in this app
-        as Review so nothing gets silently missed.
+        If the entire API call failed after all retries, mark all users
+        in this app as Review so nothing gets silently missed.
         """
         for user in app["users"]:
             user["verdict"]   = "Review"
