@@ -29,6 +29,9 @@ load_dotenv()
 VALID_VERDICTS = {"Keep", "Review", "Revoke"}
 VALID_RISKS    = {"Low", "Medium", "High"}
 
+#Max users per Claude call; large apps are split into batches
+USER_BATCH_SIZE = 100
+
 SYSTEM_PROMPT = """
 You are a senior identity security analyst performing an access certification
 review for an enterprise Okta organization. Your role is to evaluate whether
@@ -149,17 +152,22 @@ class OktaAnalyzer:
         """
         Send a single app to Claude for analysis.
         Attaches verdict, risk, and reasoning to each user in the app.
+        Large apps (>USER_BATCH_SIZE users) are split into batches.
         Falls back to Review/Unknown on any error.
         """
         if not self.enabled:
             return app
+
+        #Split large apps into batches
+        if len(app["users"]) > USER_BATCH_SIZE:
+            return self._analyze_large_app(app, anonymize=anonymize)
 
         prompt, user_map = self._build_prompt(app, anonymize=anonymize)
 
         try:
             response = self.client.messages.create(
                 model      = "claude-sonnet-4-6",
-                max_tokens = 2048,
+                max_tokens = 8192,
                 system     = [
                     {
                         "type": "text",
@@ -184,7 +192,7 @@ class OktaAnalyzer:
             try:
                 response = self.client.messages.create(
                     model      = "claude-sonnet-4-6",
-                    max_tokens = 2048,
+                    max_tokens = 8192,
                     system     = [
                         {
                             "type": "text",
@@ -209,12 +217,39 @@ class OktaAnalyzer:
 
         return app
 
+    def _analyze_large_app(self, app, anonymize=False):
+        """
+        For apps with more than USER_BATCH_SIZE users, split into
+        batches and merge verdicts back into the app dict.
+        Each batch is a separate Claude call.
+        """
+        all_users       = app["users"]
+        batches         = [
+            all_users[i:i+USER_BATCH_SIZE]
+            for i in range(0, len(all_users), USER_BATCH_SIZE)
+        ]
+        verdicted_users = []
+
+        for j, batch in enumerate(batches):
+            print(f"      batch {j+1}/{len(batches)} ({len(batch)} users)...")
+            batch_app = {
+                "id":           app["id"],
+                "name":         app["name"],
+                "sign_on_mode": app["sign_on_mode"],
+                "users":        batch,
+            }
+            batch_app = self.analyze_app(batch_app, anonymize=anonymize)
+            verdicted_users.extend(batch_app["users"])
+
+        app["users"] = verdicted_users
+        return app
+
     def _build_prompt(self, app, anonymize=False):
         """
         Build the per-app prompt with department distribution
         and individual user context.
         With anonymize=True, emails are replaced with user_001, user_002...
-        Returns (prompt_string, user_map) where user_map maps anon_id → real login.
+        Returns (prompt_string, user_map) where user_map maps anon_id -> real login.
         user_map is empty when anonymize=False.
         """
         lines = [
