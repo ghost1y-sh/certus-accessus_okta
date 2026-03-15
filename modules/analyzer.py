@@ -30,7 +30,7 @@ VALID_VERDICTS = {"Keep", "Review", "Revoke"}
 VALID_RISKS    = {"Low", "Medium", "High"}
 
 #Max users per Claude call; large apps are split into batches
-USER_BATCH_SIZE = 100
+USER_BATCH_SIZE = 75
 
 SYSTEM_PROMPT = """
 You are a senior identity security analyst performing an access certification
@@ -167,7 +167,7 @@ class OktaAnalyzer:
         try:
             response = self.client.messages.create(
                 model      = "claude-sonnet-4-6",
-                max_tokens = 8192,
+                max_tokens = 16384,
                 system     = [
                     {
                         "type": "text",
@@ -192,7 +192,7 @@ class OktaAnalyzer:
             try:
                 response = self.client.messages.create(
                     model      = "claude-sonnet-4-6",
-                    max_tokens = 8192,
+                    max_tokens = 16384,
                     system     = [
                         {
                             "type": "text",
@@ -309,6 +309,10 @@ class OktaAnalyzer:
             if raw_text.startswith("json"):
                 raw_text = raw_text[4:]
             raw_text = raw_text.strip()
+
+        if not raw_text:
+            print(f"\n[-] Empty response for {app['name']}; falling back to Review")
+            return []
 
         try:
             verdicts = json.loads(raw_text)
