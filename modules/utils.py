@@ -84,6 +84,25 @@ def redact_findings(findings):
         redacted[key] = {**finding, "items": redacted_items}
     return redacted
 
+def redact_apps(apps):
+    """
+    Walk all apps and redact email addresses from user login fields.
+    Used when --redact flag is set.
+    Names are not redacted — needed for remediation.
+    """
+    redacted = []
+    for app in apps:
+        redacted_users = []
+        for user in app.get("users", []):
+            redacted_user = dict(user)
+            if "login" in redacted_user:
+                redacted_user["login"] = redact_email(str(redacted_user["login"]))
+            redacted_users.append(redacted_user)
+        redacted_app = dict(app)
+        redacted_app["users"] = redacted_users
+        redacted.append(redacted_app)
+    return redacted
+
 def format_datetime(dt_string):
     """
     Normalize Okta's ISO 8601 timestamps to YYYY-MM-DD.
