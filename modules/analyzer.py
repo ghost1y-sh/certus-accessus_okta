@@ -43,6 +43,7 @@ RETRY_DELAYS = [30]  #one retry after 30 seconds, then fall back
 #Pace all Claude calls to prevent connection drops
 CALL_SLEEP = 2  #seconds before every API call
 
+
 SYSTEM_PROMPT = """
 You are a senior identity security analyst performing an access certification
 review for an enterprise Okta organization. Your role is to evaluate whether
@@ -136,7 +137,7 @@ class OktaAnalyzer:
             print(f"[!] ANTHROPIC_API_KEY not set; running in data-only mode\n")
             self.client = None
 
-    def _call_claude(self, prompt):
+    def _call_claude(self, prompt, debug=False):
         """
         Make a single Claude API call using streaming to prevent
         network timeouts on long responses. The Anthropic docs explicitly
@@ -151,7 +152,6 @@ class OktaAnalyzer:
                 time.sleep(CALL_SLEEP)
 
                 #Use streaming; prevents idle connection timeouts
-                #which caused the empty responses in blocking mode
                 with self.client.messages.stream(
                     model      = "claude-sonnet-4-6",
                     max_tokens = 8192,
@@ -167,6 +167,21 @@ class OktaAnalyzer:
                     message = stream.get_final_message()
 
                 text = message.content[0].text.strip() if message.content else ""
+
+                #Debug logging — write raw response details to file
+                if debug:
+                    with open("claude_debug.log", "a") as log:
+                        log.write(f"\n{'='*60}\n")
+                        log.write(f"attempt: {attempt+1}\n")
+                        log.write(f"stop_reason: {message.stop_reason}\n")
+                        log.write(f"content blocks: {len(message.content)}\n")
+                        log.write(f"usage: {message.usage}\n")
+                        if message.content:
+                            log.write(f"text length: {len(message.content[0].text)}\n")
+                            log.write(f"text preview: {message.content[0].text[:200]}\n")
+                        else:
+                            log.write(f"NO CONTENT BLOCKS RETURNED\n")
+                        log.write(f"{'='*60}\n")
 
                 if not text:
                     if attempt < MAX_RETRIES:
@@ -200,7 +215,7 @@ class OktaAnalyzer:
 
         return ""
 
-    def analyze_all(self, apps, anonymize=False):
+    def analyze_all(self, apps, anonymize=False, debug=False):
         """
         Analyze all apps. Calls analyze_app() for each.
         Returns the enriched apps list with verdicts attached.
@@ -211,7 +226,7 @@ class OktaAnalyzer:
 
         #Warmup call; ensures connection is live after collection phase
         print(f"[*] Warming up Claude API connection...\n")
-        self._call_claude("ping")
+        self._call_claude("ping", debug=debug)
 
         total    = len(apps)
         analyzed = 0
@@ -221,13 +236,13 @@ class OktaAnalyzer:
                 continue
 
             print(f"  [{i}/{total}] Analyzing: {app['name']} ({len(app['users'])} users)...")
-            app = self.analyze_app(app, anonymize=anonymize)
+            app = self.analyze_app(app, anonymize=anonymize, debug=debug)
             analyzed += 1
 
         print(f"\n[+] Analysis complete; {analyzed} apps analyzed\n")
         return apps
 
-    def analyze_app(self, app, anonymize=False):
+    def analyze_app(self, app, anonymize=False, debug=False):
         """
         Send a single app to Claude for analysis.
         Attaches verdict, risk, and reasoning to each user in the app.
@@ -239,10 +254,10 @@ class OktaAnalyzer:
 
         #Split large apps into batches
         if len(app["users"]) > USER_BATCH_SIZE:
-            return self._analyze_large_app(app, anonymize=anonymize)
+            return self._analyze_large_app(app, anonymize=anonymize, debug=debug)
 
         prompt, user_map = self._build_prompt(app, anonymize=anonymize)
-        raw_text         = self._call_claude(prompt)
+        raw_text         = self._call_claude(prompt, debug=debug)
 
         if raw_text:
             verdicts = self._parse_response(raw_text, app)
@@ -252,7 +267,7 @@ class OktaAnalyzer:
 
         return app
 
-    def _analyze_large_app(self, app, anonymize=False):
+    def _analyze_large_app(self, app, anonymize=False, debug=False):
         """
         For apps with more than USER_BATCH_SIZE users, split into
         batches and merge verdicts back into the app dict.
@@ -278,7 +293,7 @@ class OktaAnalyzer:
                 "sign_on_mode": app["sign_on_mode"],
                 "users":        batch,
             }
-            batch_app = self.analyze_app(batch_app, anonymize=anonymize)
+            batch_app = self.analyze_app(batch_app, anonymize=anonymize, debug=debug)
             verdicted_users.extend(batch_app["users"])
 
         app["users"] = verdicted_users

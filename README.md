@@ -44,8 +44,11 @@ It pulls your full Okta application access inventory, enriches each assignment w
 - **Department-aware analysis** — Claude sees the full distribution of users per app before analyzing individuals, enabling pattern-based detection
 - **Three output formats** — terminal (color-coded, actionable), JSON (audit evidence), CSV (manager review workflow)
 - **`--anonymize` flag** — replaces emails with anonymous IDs in Claude prompts so Anthropic's API never receives email addresses
+- **`--save-okta` / `--from-file`** — save Okta collection output to a file and reuse it for subsequent analysis runs without hitting the Okta API again
+- **`--debug` flag** — writes raw Claude API responses to `claude_debug.log` for troubleshooting
 - **Graceful degradation** — runs in data-only mode without an Anthropic API key, producing a raw access inventory
 - **Rate limit aware** — handles Okta's per-endpoint rate limits with automatic backoff, safe for large orgs
+- **Streaming API calls** — uses the Anthropic streaming API to prevent connection timeouts on long-running analysis
 - **Enterprise-safe** — read-only, PII redaction flag, explicit data isolation between Okta and Claude
 
 ---
@@ -63,12 +66,13 @@ It pulls your full Okta application access inventory, enriches each assignment w
 │         ▼                                                   │
 │  ┌─────────────┐                                            │
 │  │ collector.py│  builds structured Python dicts in memory  │
+│  │             │  optionally saved to okta_data.json        │
 │  └──────┬──────┘                                            │
 │         │ app/user dicts (no tokens, no Okta IDs sent out) │
 │         ▼                                                   │
 │  ┌─────────────┐   text prompt     ┌─────────────────────┐ │
 │  │ analyzer.py │ ────────────────► │  Anthropic API      │ │
-│  │             │ ◄──────────────── │  (Claude)           │ │
+│  │  (streaming)│ ◄──────────────── │  (Claude)           │ │
 │  └──────┬──────┘   JSON verdicts   └─────────────────────┘ │
 │         │                                                   │
 │         ▼                                                   │
@@ -82,7 +86,7 @@ It pulls your full Okta application access inventory, enriches each assignment w
 
 **Okta never communicates with Claude.** The Okta API token stays on your machine. It is never sent to Anthropic's servers.
 
-**What Claude receives:** a structured text prompt containing app name, sign-on type, department distribution, and per-user lines with login (or anonymous ID), department, title, account status, days since assignment, and last access date.
+**What Claude receives:** a structured text prompt containing app name, sign-on type, department distribution, and per-user lines with login or anonymous ID, department, title, account status, days since assignment, and last access date.
 
 **What goes to Anthropic's servers:** only the text prompt described above. Use `--anonymize` to ensure no email addresses are included. See the Security & Privacy section below.
 
@@ -128,7 +132,25 @@ python3 main.py --verify
 
 Confirms the Okta token is valid and prints the actual admin role level. Run this first when setting up for a new org.
 
-### Full run with output saved
+### Recommended workflow for large orgs
+
+Large orgs (500+ users, 100+ apps) benefit from separating the Okta collection step from the Claude analysis step. This lets you fix analysis issues without re-pulling from Okta.
+
+**Step 1 — Collect Okta data and save to file:**
+```bash
+python3 main.py --save-okta okta_data.json --dry-run
+```
+
+Pulls all users, apps, assignments, and access logs from Okta. Saves to `okta_data.json`. Skips Claude analysis. Fast, no API cost.
+
+**Step 2 — Run analysis from saved file:**
+```bash
+python3 main.py --from-file okta_data.json --anonymize --output report_$(date +%Y%m%d)
+```
+
+Skips Okta entirely. Loads from file, runs Claude analysis, produces report. Repeat as needed without hitting Okta again.
+
+### Full run with output saved (small orgs)
 
 ```bash
 python3 main.py --output report_$(date +%Y%m%d)
@@ -142,15 +164,7 @@ Produces `report_YYYYMMDD.json` and `report_YYYYMMDD.csv`.
 python3 main.py --anonymize --output report_$(date +%Y%m%d)
 ```
 
-Replaces all email addresses with anonymous IDs before sending to Claude. Verdicts are mapped back to real emails in the output. Anthropic's API receives no email addresses in this mode.
-
-### Dry run — data collection only, no Claude calls
-
-```bash
-python3 main.py --dry-run --output inventory
-```
-
-Useful for verifying the data pipeline before spending API credits, or for producing a raw access inventory without AI analysis.
+Replaces all email addresses with anonymous IDs before sending to Claude. Verdicts are mapped back to real emails in the output.
 
 ### Skip system log queries (faster, less accurate)
 
@@ -158,20 +172,28 @@ Useful for verifying the data pipeline before spending API credits, or for produ
 python3 main.py --no-access-log --output report
 ```
 
-Skips the per-app system log queries that determine last app access. Faster for large orgs but `last_app_access` will show as Unknown for all users. Claude will note this in its reasoning.
+Skips the per-app system log queries that determine last app access. Faster for large orgs but `last_app_access` will show as Unknown. Claude will note this in its reasoning.
+
+### Debug Claude API responses
+
+```bash
+python3 main.py --from-file okta_data.json --debug --output report
+```
+
+Writes raw Claude API response details to `claude_debug.log` — stop_reason, content blocks, token usage, and response preview. Use when troubleshooting empty or malformed responses.
 
 ### Analyze a single app
 
 ```bash
-python3 main.py --app "GitHub" --output github_report
+python3 main.py --from-file okta_data.json --app "GitHub" --output github_report
 ```
 
-Filters collection and analysis to apps whose name contains the string. Case-insensitive. Useful for targeted investigation or testing.
+Filters to apps whose name contains the string. Case-insensitive. Useful for targeted investigation.
 
 ### Filter to one department
 
 ```bash
-python3 main.py --dept "Finance" --output finance_report
+python3 main.py --from-file okta_data.json --dept "Finance" --output finance_report
 ```
 
 Shows only Finance users across all apps. Useful for department-level access reviews.
@@ -179,26 +201,26 @@ Shows only Finance users across all apps. Useful for department-level access rev
 ### Show only Revoke verdicts
 
 ```bash
-python3 main.py --failing-only --output report
+python3 main.py --from-file okta_data.json --failing-only --output report
 ```
 
-Suppresses Keep and Review in terminal output. Shows only items Claude recommends revoking.
+Suppresses Keep and Review in terminal output.
 
 ### Show all verdicts including Keep
 
 ```bash
-python3 main.py --show-all --output report
+python3 main.py --from-file okta_data.json --show-all --output report
 ```
 
-By default Keep verdicts are hidden in the terminal — on a large org most users will be Keep and showing them all makes the report unreadable. Use this flag for a complete picture.
+By default Keep verdicts are hidden — on a large org most users will be Keep and showing them all makes the report unreadable.
 
 ### Redact emails in output files
 
 ```bash
-python3 main.py --redact --output report
+python3 main.py --from-file okta_data.json --redact --output report
 ```
 
-Partially masks email addresses in terminal output and both output files. First 3 characters of the local part are preserved for identification. Names are not redacted.
+Partially masks email addresses in terminal output and output files.
 
 ```
 alice.admin@corp.com → ali*****@corp.com
@@ -210,8 +232,11 @@ alice.admin@corp.com → ali*****@corp.com
 |---|---|
 | `--domain` | Okta domain. Overrides `.env` if set. |
 | `--output` | Base filename for output (produces `.json` and `.csv`) |
+| `--save-okta` | Save Okta collection output to a JSON file for reuse |
+| `--from-file` | Skip Okta collection and load from a saved file |
+| `--debug` | Write raw Claude API responses to `claude_debug.log` |
 | `--redact` | Partially redact email addresses in output files |
-| `--anonymize` | Replace emails with anonymous IDs in Claude prompts. Recommended for orgs with strict DPA requirements. |
+| `--anonymize` | Replace emails with anonymous IDs in Claude prompts |
 | `--show-all` | Show Keep verdicts in terminal (hidden by default) |
 | `--failing-only` | Show only Revoke verdicts in terminal |
 | `--no-access-log` | Skip system log queries — faster but less accurate |
@@ -236,17 +261,21 @@ The department distribution is critical — it gives Claude pattern context befo
 
 ### Verdict logic
 
-**Keep** — access is clearly appropriate for the user's role, regardless of usage frequency. A Finance director may legitimately have Salesforce access even if they haven't logged in recently. Usage is not penalized if the role fit is strong.
+**Keep** — access is clearly appropriate for the user's role, regardless of usage frequency. Usage is not penalized if the role fit is strong.
 
-**Review** — access is ambiguous and requires human judgment. Used when the department could be unusual but has a plausible business reason, the user's title is vague, it is a service or bot account, or the user is in the wrong department but has been actively using the app (active use suggests a reason worth investigating before revoking).
+**Review** — access is ambiguous and requires human judgment. Used when the department could be unusual but has a plausible business reason, the user's title is vague, it is a service or bot account, or the user is in the wrong department but has been actively using the app.
 
 **Revoke** — used only when **both** of the following are true:
 1. The access appears inappropriate for the user's department and title with no plausible cross-functional justification
 2. AND usage data confirms the access is unused or stale: never accessed, not accessed in 180+ days, or the user's Okta account is suspended or deprovisioned
 
-**Claude never Revokes based on usage alone.** A legitimate user who happens not to have accessed an app recently should not lose access. Role mismatch is always required as the primary signal.
+**Claude never Revokes based on usage alone.** Role mismatch is always required as the primary signal.
 
 **Claude errs toward Review rather than Revoke when uncertain.** A false Revoke that removes legitimate access is disruptive and erodes trust. Human review is the safety net.
+
+### Streaming API
+
+Claude API calls use streaming to keep connections alive during long-running analysis. Without streaming, network connections can drop silently on responses that take more than a few seconds, producing empty responses. Streaming eliminates this by receiving tokens as they are generated rather than waiting for a complete response.
 
 ### Risk levels
 
@@ -266,6 +295,8 @@ certus-accessus_okta uses Claude Sonnet by default. For a typical enterprise org
 | Enterprise (5000 users) | ~500 apps | ~$6.00 |
 
 Prompt caching reduces cost further — the system prompt is cached after the first call and subsequent calls are charged at 10% of normal input token cost.
+
+**Note:** Large orgs with many apps assigned to hundreds of users will cost more due to the volume of Claude calls required. Using `--save-okta` and `--from-file` ensures you only pay for collection once and can re-run analysis as needed.
 
 ---
 
@@ -320,7 +351,7 @@ Manager review workflow document. Columns:
 | `action_taken` | **Blank — IT team fills in** |
 | `review_date` | **Blank — IT team fills in** |
 
-The last three columns are intentionally blank. This is the handoff document. The IT director filters by `ai_verdict = Revoke`, works through each row, records who reviewed it and what was done. The completed CSV is SOC 2 access review evidence.
+The last three columns are intentionally blank. The IT director filters by `ai_verdict = Revoke`, works through each row, records who reviewed it and what was done. The completed CSV is SOC 2 access review evidence.
 
 ---
 
@@ -369,8 +400,14 @@ This workflow satisfies the periodic access review requirement under SOC 2 (CC6.
 **Minimizing PII exposure to Anthropic**
 - By default, user email addresses are included in Claude prompts to make verdicts traceable
 - Use `--anonymize` to replace all emails with anonymous IDs (user_001, user_002...) before sending to the Claude API
-- Verdicts are mapped back to real emails in the final output — Anthropic's API never receives a single email address in this mode, only departments, titles, and access metadata
+- Verdicts are mapped back to real emails in the final output — Anthropic's API never receives a single email address in this mode
 - Recommended for orgs with strict DPA requirements or concerns about API request logging retention
+
+**Saved Okta data (`--save-okta`)**
+- The `okta_data.json` file produced by `--save-okta` contains user emails, departments, titles, and access data
+- Treat this file with the same care as any other PII-containing export
+- Add `*.json` to `.gitignore` to prevent accidental commits
+- Delete after the audit is complete
 
 **Enterprise data handling**
 - For production use, ensure your Anthropic enterprise agreement covers the data being processed

@@ -12,6 +12,7 @@ All remediation must be performed manually by your IT and Security teams.
 import argparse
 import sys
 import time
+import json
 from modules.connector import OktaConnector
 from modules.collector import OktaCollector
 from modules.analyzer  import OktaAnalyzer
@@ -77,6 +78,21 @@ def parse_args():
         action="store_true",
         help="Test connection and token scope only. Does not run a full scan."
     )
+    parser.add_argument(
+        "--save-okta",
+        default=None,
+        help="Save Okta collection output to this JSON file for reuse with --from-file."
+    )
+    parser.add_argument(
+        "--from-file",
+        default=None,
+        help="Skip Okta collection entirely and load from a previously saved --save-okta file."
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Write raw Claude API responses to claude_debug.log for troubleshooting."
+    )
     return parser.parse_args()
 
 
@@ -113,6 +129,7 @@ def verify_connection(connector, domain):
     print(f"{Color.GREEN}[+] Token permission level: {role_level}{Color.RESET}")
     print(f"{Color.GREEN}[+] Domain reachable: {domain}{Color.RESET}")
     print(f"{Color.GREEN}[+] Ready to run full access certification scan.{Color.RESET}\n")
+
 
 def filter_apps(apps, app_filter=None, dept_filter=None):
     """
@@ -168,23 +185,34 @@ def main():
   {Color.YELLOW}All remediation must be performed manually by your IT and Security teams.{Color.RESET}
     """)
 
-    #Connect
-    print(f"[*] Connecting to {domain}...")
-    connector = OktaConnector(domain, token)
-    if not connector.test_connection():
-        sys.exit(1)
-    print(f"{Color.GREEN}[+] Connection verified.{Color.RESET}\n")
+    #Connect — skip entirely if loading from file
+    connector = None
+    if not args.from_file:
+        print(f"[*] Connecting to {domain}...")
+        connector = OktaConnector(domain, token)
+        if not connector.test_connection():
+            sys.exit(1)
+        print(f"{Color.GREEN}[+] Connection verified.{Color.RESET}\n")
 
-    #Verify only
-    if args.verify:
-        verify_connection(connector, domain)
-        sys.exit(0)
+        if args.verify:
+            verify_connection(connector, domain)
+            sys.exit(0)
 
-    #Collect
-    collector = OktaCollector(connector)
-    apps      = collector.collect_all(
-        skip_access_log=args.no_access_log
-    )
+    #Collect — either from Okta API or from saved file
+    if args.from_file:
+        print(f"{Color.YELLOW}[*] Loading Okta data from file: {args.from_file}{Color.RESET}\n")
+        with open(args.from_file, "r") as f:
+            apps = json.load(f)
+        print(f"{Color.GREEN}[+] Loaded {len(apps):,} apps from file.{Color.RESET}\n")
+    else:
+        collector = OktaCollector(connector)
+        apps      = collector.collect_all(
+            skip_access_log=args.no_access_log
+        )
+        if args.save_okta:
+            with open(args.save_okta, "w") as f:
+                json.dump(apps, f, indent=2, default=str)
+            print(f"{Color.GREEN}[+] Okta data saved to: {args.save_okta}{Color.RESET}\n")
 
     #Apply filters
     if args.app or args.dept:
@@ -202,10 +230,12 @@ def main():
     else:
         if args.anonymize:
             print(f"{Color.YELLOW}[*] Anonymize mode — emails replaced with IDs in Claude prompts.{Color.RESET}\n")
+        if args.debug:
+            print(f"{Color.YELLOW}[*] Debug mode — raw Claude responses written to claude_debug.log{Color.RESET}\n")
         ai_enabled = analyzer.enabled
         if ai_enabled:
             print(f"[*] Running AI analysis...\n")
-            apps = analyzer.analyze_all(apps, anonymize=args.anonymize)
+            apps = analyzer.analyze_all(apps, anonymize=args.anonymize, debug=args.debug)
 
     #Redact if requested
     if args.redact:
