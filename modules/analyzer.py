@@ -33,6 +33,12 @@ VALID_RISKS    = {"Low", "Medium", "High"}
 #Max users per Claude call; large apps are split into batches
 USER_BATCH_SIZE = 75
 
+#Seconds to wait between batches on large apps
+#Tier 1 API accounts are limited to 8K output tokens/min
+#75 users × ~50 tokens per verdict = ~3750 tokens per batch
+#One batch every 30s keeps us safely under the limit
+BATCH_SLEEP = 30
+
 SYSTEM_PROMPT = """
 You are a senior identity security analyst performing an access certification
 review for an enterprise Okta organization. Your role is to evaluate whether
@@ -168,7 +174,7 @@ class OktaAnalyzer:
         try:
             response = self.client.messages.create(
                 model      = "claude-sonnet-4-6",
-                max_tokens = 16384,
+                max_tokens = 4096,
                 system     = [
                     {
                         "type": "text",
@@ -183,11 +189,11 @@ class OktaAnalyzer:
 
             #Handle empty response with a retry before falling back
             if not response.content or not response.content[0].text.strip():
-                print(f"\n[!] Empty response for {app['name']}; retrying after 30s...")
+                print(f"\n[!] Empty response for {app['name']} — retrying after 30s...")
                 time.sleep(30)
                 response = self.client.messages.create(
                     model      = "claude-sonnet-4-6",
-                    max_tokens = 16384,
+                    max_tokens = 4096,
                     system     = [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
                     messages   = [{"role": "user", "content": prompt}]
                 )
@@ -203,7 +209,7 @@ class OktaAnalyzer:
             try:
                 response = self.client.messages.create(
                     model      = "claude-sonnet-4-6",
-                    max_tokens = 16384,
+                    max_tokens = 4096,
                     system     = [
                         {
                             "type": "text",
@@ -218,11 +224,11 @@ class OktaAnalyzer:
 
                 #Handle empty response on retry path too
                 if not response.content or not response.content[0].text.strip():
-                    print(f"\n[!] Empty response on retry for {app['name']}; retrying after 30s...")
+                    print(f"\n[!] Empty response on retry for {app['name']} — retrying after 30s...")
                     time.sleep(30)
                     response = self.client.messages.create(
                         model      = "claude-sonnet-4-6",
-                        max_tokens = 16384,
+                        max_tokens = 4096,
                         system     = [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
                         messages   = [{"role": "user", "content": prompt}]
                     )
@@ -244,7 +250,8 @@ class OktaAnalyzer:
         """
         For apps with more than USER_BATCH_SIZE users, split into
         batches and merge verdicts back into the app dict.
-        Each batch is a separate Claude call.
+        Each batch is a separate Claude call with a sleep between
+        batches to respect Tier 1 output token limits (8K/min).
         """
         all_users       = app["users"]
         batches         = [
@@ -255,6 +262,11 @@ class OktaAnalyzer:
 
         for j, batch in enumerate(batches):
             print(f"      batch {j+1}/{len(batches)} ({len(batch)} users)...")
+
+            #Sleep between batches to stay under Tier 1 output token limit
+            if j > 0:
+                time.sleep(BATCH_SLEEP)
+
             batch_app = {
                 "id":           app["id"],
                 "name":         app["name"],
