@@ -138,6 +138,18 @@ class OktaAnalyzer:
         if not self.enabled:
             return apps
 
+        #Warmup call — ensures the connection is live after the
+        #potentially long Okta collection phase before analysis begins
+        print(f"[*] Warming up Claude API connection...\n")
+        try:
+            self.client.messages.create(
+                model      = "claude-sonnet-4-6",
+                max_tokens = 10,
+                messages   = [{"role": "user", "content": "ping"}]
+            )
+        except Exception:
+            pass  #warmup failure is non-fatal
+
         total    = len(apps)
         analyzed = 0
 
