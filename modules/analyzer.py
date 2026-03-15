@@ -32,12 +32,7 @@ VALID_RISKS    = {"Low", "Medium", "High"}
 
 #Max users per Claude call; large apps are split into batches
 USER_BATCH_SIZE = 75
-
-#Seconds to wait between batches on large apps
-#Tier 1 API accounts are limited to 8K output tokens/min
-#75 users × ~50 tokens per verdict = ~3750 tokens per batch
-#One batch every 30s keeps us safely under the limit
-BATCH_SLEEP = 30
+BATCH_SLEEP = 5
 
 SYSTEM_PROMPT = """
 You are a senior identity security analyst performing an access certification
