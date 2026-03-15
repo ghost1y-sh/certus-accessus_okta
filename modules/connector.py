@@ -89,6 +89,9 @@ class OktaConnector:
             resp = requests.get(url, headers=self.headers, params=p)
             self._check_rate_limit(resp)
 
+            if resp.status_code in (403, 405):
+                print(f"[-] {endpoint} not available on this plan; skipping.")
+                break
             if resp.status_code != 200:
                 print(f"[-] API error on {endpoint}: {resp.status_code} {resp.text[:200]}")
                 break
@@ -101,7 +104,39 @@ class OktaConnector:
             p   = {}  #params only on first request, URL encodes them after
 
         return results
-    
+
+    def get_logs(self, params=None):
+        """
+        Paginated GET for /logs endpoint.
+        Uses a higher rate limit threshold than get_all() because
+        Okta applies stricter limits to system log queries.
+        Sleeps earlier to avoid hammering the log endpoint.
+        """
+        results = []
+        url     = f"{self.base_url}/logs"
+        p       = {"limit": 100, **(params or {})}
+
+        while url:
+            resp = requests.get(url, headers=self.headers, params=p)
+            self._check_rate_limit(resp, threshold=10)
+
+            if resp.status_code in (403, 405):
+                print(f"[-] /logs not available; skipping.")
+                break
+            if resp.status_code != 200:
+                print(f"[-] Log query failed: {resp.status_code} {resp.text[:200]}")
+                break
+
+            batch = resp.json()
+            if not batch:
+                break
+
+            results.extend(batch)
+            url = self._next_page(resp)
+            p   = {}
+
+        return results
+
     def _next_page(self, resp):
         """
         Parse Okta's Link header to get the next page URL.
@@ -115,11 +150,13 @@ class OktaConnector:
                 return url.lstrip("<").rstrip(">")
         return None
     
-    def _check_rate_limit(self, resp):
+    def _check_rate_limit(self, resp, threshold=2):
         """
         Check Okta's rate limit headers and sleep if we're close to the limit.
         Okta resets limits every 60 seconds.
         Headers: X-Rate-Limit-Remaining, X-Rate-Limit-Reset
+        threshold: sleep when remaining requests falls to this level.
+                   Default 2 for normal endpoints, use 10 for /logs.
         """
         remaining = resp.headers.get("X-Rate-Limit-Remaining")
         reset     = resp.headers.get("X-Rate-Limit-Reset")
@@ -129,9 +166,9 @@ class OktaConnector:
 
         remaining = int(remaining)
 
-        if remaining <= 5:
+        if remaining <= threshold:
             if reset:
-                #Reset is a Unix timestamp - sleep until then + 1s buffer
+                #Reset is a Unix timestamp; sleep until then + 1s buffer
                 sleep_secs = max(1, int(reset) - int(time.time()) + 1)
                 print(f"[!] Rate limit nearly exceeded. waiting {sleep_secs}s...")
                 time.sleep(sleep_secs)
