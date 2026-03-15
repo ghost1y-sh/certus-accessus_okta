@@ -33,8 +33,8 @@ OKTA_INTERNAL_APPS = {
 ACCESS_LOG_DAYS = 180
 
 #Batch size for app processing; pause between batches to respect rate limits
-BATCH_SIZE  = 20
-BATCH_SLEEP = 2
+BATCH_SIZE  = 10
+BATCH_SLEEP = 3
 
 
 class OktaCollector:
