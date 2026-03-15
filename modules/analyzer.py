@@ -21,6 +21,7 @@ in the output. Anthropic's API never receives email addresses in this mode.
 
 import os
 import json
+import time
 import anthropic
 from dotenv import load_dotenv
 
@@ -180,13 +181,23 @@ class OktaAnalyzer:
                 ]
             )
 
-            raw_text = response.content[0].text.strip()
+            #Handle empty response with a retry before falling back
+            if not response.content or not response.content[0].text.strip():
+                print(f"\n[!] Empty response for {app['name']}; retrying after 30s...")
+                time.sleep(30)
+                response = self.client.messages.create(
+                    model      = "claude-sonnet-4-6",
+                    max_tokens = 16384,
+                    system     = [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+                    messages   = [{"role": "user", "content": prompt}]
+                )
+
+            raw_text = response.content[0].text.strip() if response.content else ""
             verdicts = self._parse_response(raw_text, app)
             app      = self._attach_verdicts(app, verdicts, user_map=user_map)
 
         except anthropic.RateLimitError:
             print(f"\n[!] Rate limit hit on {app['name']}; waiting 60s...")
-            import time
             time.sleep(60)
             #Retry once
             try:
@@ -204,7 +215,19 @@ class OktaAnalyzer:
                         {"role": "user", "content": prompt}
                     ]
                 )
-                raw_text = response.content[0].text.strip()
+
+                #Handle empty response on retry path too
+                if not response.content or not response.content[0].text.strip():
+                    print(f"\n[!] Empty response on retry for {app['name']}; retrying after 30s...")
+                    time.sleep(30)
+                    response = self.client.messages.create(
+                        model      = "claude-sonnet-4-6",
+                        max_tokens = 16384,
+                        system     = [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+                        messages   = [{"role": "user", "content": prompt}]
+                    )
+
+                raw_text = response.content[0].text.strip() if response.content else ""
                 verdicts = self._parse_response(raw_text, app)
                 app      = self._attach_verdicts(app, verdicts, user_map=user_map)
             except Exception as e:
