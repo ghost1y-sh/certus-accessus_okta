@@ -34,11 +34,14 @@ VALID_RISKS    = {"Low", "Medium", "High"}
 #50 users × ~75 tokens per verdict = ~3750 tokens per batch
 #Comfortably under 8192 max_tokens per call
 USER_BATCH_SIZE = 50
-BATCH_SLEEP     = 10
+BATCH_SLEEP     = 2
 
-#Retry config for empty/failed responses
-MAX_RETRIES     = 3
-RETRY_DELAYS    = [15, 30, 60]  #seconds between retries
+#Retry config; keep retries low to avoid runaway API cost
+MAX_RETRIES  = 1
+RETRY_DELAYS = [30]  #one retry after 30 seconds, then fall back
+
+#Pace all Claude calls to prevent connection drops
+CALL_SLEEP = 2  #seconds before every API call
 
 SYSTEM_PROMPT = """
 You are a senior identity security analyst performing an access certification
@@ -135,13 +138,21 @@ class OktaAnalyzer:
 
     def _call_claude(self, prompt):
         """
-        Make a single Claude API call with up to MAX_RETRIES retries.
-        Retries on empty responses and RateLimitErrors.
-        Returns raw response text or empty string on total failure.
+        Make a single Claude API call using streaming to prevent
+        network timeouts on long responses. The Anthropic docs explicitly
+        recommend streaming for requests that may take more than a few seconds.
+        Streaming keeps the connection alive by receiving tokens as they
+        are generated rather than waiting for the full response silently.
+        Retries once on failure then falls back to Review.
         """
         for attempt in range(MAX_RETRIES + 1):
             try:
-                response = self.client.messages.create(
+                #Pace all calls; prevents connection drops under sustained load
+                time.sleep(CALL_SLEEP)
+
+                #Use streaming; prevents idle connection timeouts
+                #which caused the empty responses in blocking mode
+                with self.client.messages.stream(
                     model      = "claude-sonnet-4-6",
                     max_tokens = 8192,
                     system     = [
@@ -152,29 +163,31 @@ class OktaAnalyzer:
                         }
                     ],
                     messages   = [{"role": "user", "content": prompt}]
-                )
+                ) as stream:
+                    message = stream.get_final_message()
 
-                #Check for empty response
-                if not response.content or not response.content[0].text.strip():
+                text = message.content[0].text.strip() if message.content else ""
+
+                if not text:
                     if attempt < MAX_RETRIES:
                         delay = RETRY_DELAYS[attempt]
-                        print(f"\n[!] Empty response (attempt {attempt+1}/{MAX_RETRIES+1}) — retrying in {delay}s...")
+                        print(f"\n[!] Empty response (attempt {attempt+1}/{MAX_RETRIES+1}); retrying in {delay}s...")
                         time.sleep(delay)
                         continue
                     else:
-                        print(f"\n[-] Empty response after {MAX_RETRIES} retries — giving up.")
+                        print(f"\n[-] Empty response after {MAX_RETRIES} retries; falling back to Review.")
                         return ""
 
-                return response.content[0].text.strip()
+                return text
 
             except anthropic.RateLimitError:
                 if attempt < MAX_RETRIES:
                     delay = RETRY_DELAYS[attempt]
-                    print(f"\n[!] Rate limit hit (attempt {attempt+1}/{MAX_RETRIES+1}) — retrying in {delay}s...")
+                    print(f"\n[!] Rate limit hit (attempt {attempt+1}/{MAX_RETRIES+1}); retrying in {delay}s...")
                     time.sleep(delay)
                     continue
                 else:
-                    print(f"\n[-] Rate limit persists after {MAX_RETRIES} retries — giving up.")
+                    print(f"\n[-] Rate limit persists; falling back to Review.")
                     return ""
 
             except Exception as e:
@@ -196,7 +209,7 @@ class OktaAnalyzer:
         if not self.enabled:
             return apps
 
-        #Warmup call — ensures connection is live after collection phase
+        #Warmup call; ensures connection is live after collection phase
         print(f"[*] Warming up Claude API connection...\n")
         self._call_claude("ping")
 
