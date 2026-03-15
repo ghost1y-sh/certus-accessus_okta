@@ -31,8 +31,10 @@ VALID_VERDICTS = {"Keep", "Review", "Revoke"}
 VALID_RISKS    = {"Low", "Medium", "High"}
 
 #Max users per Claude call; large apps are split into batches
-USER_BATCH_SIZE = 75
-BATCH_SLEEP = 5
+#50 users × ~75 tokens per verdict = ~3750 tokens per batch
+#Comfortably under 8192 max_tokens per call
+USER_BATCH_SIZE = 50
+BATCH_SLEEP     = 5
 
 SYSTEM_PROMPT = """
 You are a senior identity security analyst performing an access certification
@@ -169,7 +171,7 @@ class OktaAnalyzer:
         try:
             response = self.client.messages.create(
                 model      = "claude-sonnet-4-6",
-                max_tokens = 4096,
+                max_tokens = 8192,
                 system     = [
                     {
                         "type": "text",
@@ -188,7 +190,7 @@ class OktaAnalyzer:
                 time.sleep(30)
                 response = self.client.messages.create(
                     model      = "claude-sonnet-4-6",
-                    max_tokens = 4096,
+                    max_tokens = 8192,
                     system     = [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
                     messages   = [{"role": "user", "content": prompt}]
                 )
@@ -204,7 +206,7 @@ class OktaAnalyzer:
             try:
                 response = self.client.messages.create(
                     model      = "claude-sonnet-4-6",
-                    max_tokens = 4096,
+                    max_tokens = 8192,
                     system     = [
                         {
                             "type": "text",
@@ -223,7 +225,7 @@ class OktaAnalyzer:
                     time.sleep(30)
                     response = self.client.messages.create(
                         model      = "claude-sonnet-4-6",
-                        max_tokens = 4096,
+                        max_tokens = 8192,
                         system     = [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
                         messages   = [{"role": "user", "content": prompt}]
                     )
@@ -245,8 +247,8 @@ class OktaAnalyzer:
         """
         For apps with more than USER_BATCH_SIZE users, split into
         batches and merge verdicts back into the app dict.
-        Each batch is a separate Claude call with a sleep between
-        batches to respect Tier 1 output token limits (8K/min).
+        Each batch is a separate Claude call with a brief sleep between
+        batches to avoid bursting the output token rate limit.
         """
         all_users       = app["users"]
         batches         = [
@@ -258,7 +260,6 @@ class OktaAnalyzer:
         for j, batch in enumerate(batches):
             print(f"      batch {j+1}/{len(batches)} ({len(batch)} users)...")
 
-            #Sleep between batches to stay under Tier 1 output token limit
             if j > 0:
                 time.sleep(BATCH_SLEEP)
 
