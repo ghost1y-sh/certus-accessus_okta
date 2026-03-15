@@ -69,7 +69,7 @@ def parse_args():
     )
     parser.add_argument(
         "--anonymize",
-        action="stored_true",
+        action="store_true",
         help="Replace emails with anonymous IDs in Claude prompts. Recommended for orgs with strict PII policies."
     )
     parser.add_argument(
@@ -198,10 +198,10 @@ def main():
     analyzer = OktaAnalyzer()
     if args.dry_run:
         print(f"{Color.YELLOW}[*] Dry run; skipping Claude analysis.{Color.RESET}\n")
-        if args.anonymize:
-            print(f"{Color.YELLOW}[*] Anonymize mode - emails replaced with IDs in Claude prompts.{Color.RESET}\n")
         ai_enabled = False
     else:
+        if args.anonymize:
+            print(f"{Color.YELLOW}[*] Anonymize mode — emails replaced with IDs in Claude prompts.{Color.RESET}\n")
         ai_enabled = analyzer.enabled
         if ai_enabled:
             print(f"[*] Running AI analysis...\n")
