@@ -2,6 +2,8 @@
 
 > AI-powered Okta access certification. Audit who has access to what, flag anomalies using Claude, and produce a remediation-ready CSV for your IT team — all without making a single change to your Okta organization.
 
+credit: github.com/ghost1y-sh && dt_ta
+
 ```
   ██████╗███████╗██████╗ ████████╗██╗   ██╗███████╗
  ██╔════╝██╔════╝██╔══██╗╚══██╔══╝██║   ██║██╔════╝
